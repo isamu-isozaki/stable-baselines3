@@ -125,7 +125,6 @@ class A2C(OnPolicyAlgorithm):
 
         # This will only loop once (get all data in one go)
         for rollout_data in self.rollout_buffer.get(batch_size=None):
-
             actions = rollout_data.actions
             if isinstance(self.action_space, spaces.Discrete):
                 # Convert discrete action from float to long
@@ -166,6 +165,7 @@ class A2C(OnPolicyAlgorithm):
         explained_var = explained_variance(self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten())
 
         self._n_updates += 1
+
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         logger.record("train/explained_variance", explained_var)
         logger.record("train/entropy_loss", entropy_loss.item())

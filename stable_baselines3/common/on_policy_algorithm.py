@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import gym
 import numpy as np
 import torch as th
+import pickle
 
 from stable_baselines3.common import logger
 from stable_baselines3.common.base_class import BaseAlgorithm
@@ -202,7 +203,37 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         callback.on_rollout_end()
 
         return True
+    def collect_rollouts_from_files(
+        self,
+        rollout_buffer: RolloutBuffer,
+        steps: list,
+    ) -> None:
+        """
+        Collect experiences and store them into a ``RolloutBuffer``.
 
+        :param rollout_buffer:
+        :param steps: The list of steps from which the transitions are taken from
+        :return:
+        """
+        rollout_buffer.reset()
+
+        for step in steps:
+            filename = step.file_path
+            with open(filename, 'rb') as f:
+                (obs, action, reward, done, infos, new_obs) = pickle.load(f)
+            with th.no_grad():
+                # Convert to pytorch tensor or to TensorDict
+                obs_tensor = obs_as_tensor(obs, self.device)
+                _, values, log_probs = self.policy.forward(obs_tensor)
+            rollout_buffer.add(obs, action, reward, done, values, log_probs)
+        with th.no_grad():
+            # Compute value for the last timestep
+            obs_tensor = obs_as_tensor(new_obs, self.device)
+            _, values, _ = self.policy.forward(obs_tensor)
+
+        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=done)
+        self.num_timesteps += len(steps)
+        return True
     def train(self) -> None:
         """
         Consume current rollout data and update policy parameters.
@@ -257,7 +288,56 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         callback.on_training_end()
 
         return self
+    def learn_from_steps(
+        self,
+        total_timesteps: int,
+        get_steps,
+        log_interval: int = 1,
+        callback: MaybeCallback = None,
+        eval_log_path: Optional[str] = None,
+        tb_log_name: str = 'run'
+    ) -> "OnPolicyAlgorithm":
+        iteration=0
+        self.basic_setup_learn(
+            total_timesteps,
+            eval_log_path,
+            tb_log_name
+        )
+        # callback.on_training_start(locals(), globals())
+        while self.num_timesteps < total_timesteps:
 
+            steps =  get_steps(self.n_steps)
+            continue_training = self.collect_rollouts_from_files(
+                self.rollout_buffer,
+                steps
+            )
+
+            if continue_training is False:
+                break
+
+            iteration += 1
+            self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
+            if log_interval is not None and iteration % log_interval == 0:
+                logger.dump(step=self.num_timesteps)
+                
+            # Display training infos
+            # if log_interval is not None and iteration % log_interval == 0:
+            #     fps = int(self.num_timesteps / (time.time() - self.start_time))
+            #     logger.record("time/iterations", iteration, exclude="tensorboard")
+            #     if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
+            #         logger.record("rollout/ep_rew_mean", safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]))
+            #         logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
+            #     logger.record("time/fps", fps)
+            #     logger.record("time/time_elapsed", int(time.time() - self.start_time), exclude="tensorboard")
+            #     logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
+            #     logger.dump(step=self.num_timesteps)
+
+            self.train()
+
+        # callback.on_training_end()
+
+        return self
+        
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "policy.optimizer"]
 

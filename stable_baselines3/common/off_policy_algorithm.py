@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import gym
 import numpy as np
 import torch as th
+import pickle
 
 from stable_baselines3.common import logger
 from stable_baselines3.common.base_class import BaseAlgorithm
@@ -268,7 +269,41 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             self.replay_buffer.set_env(self.get_env())
             if truncate_last_traj:
                 self.replay_buffer.truncate_last_trajectory()
+    def basic_setup_learn(
+        self,
+        total_timesteps: int,
+        log_path: Optional[str] = None,
+        reset_num_timesteps: bool = True,
+        tb_log_name: str = "run"
+    ):
+        if isinstance(self.replay_buffer, HerReplayBuffer):
+            replay_buffer = self.replay_buffer.replay_buffer
+        else:
+            replay_buffer = self.replay_buffer
 
+        truncate_last_traj = (
+            self.optimize_memory_usage
+            and reset_num_timesteps
+            and replay_buffer is not None
+            and (replay_buffer.full or replay_buffer.pos > 0)
+        )
+
+        if truncate_last_traj:
+            warnings.warn(
+                "The last trajectory in the replay buffer will be truncated, "
+                "see https://github.com/DLR-RM/stable-baselines3/issues/46."
+                "You should use `reset_num_timesteps=False` or `optimize_memory_usage=False`"
+                "to avoid that issue."
+            )
+            # Go to the previous index
+            pos = (replay_buffer.pos - 1) % replay_buffer.buffer_size
+            replay_buffer.dones[pos] = True
+        return super().basic_setup_learn(
+            total_timesteps,
+            log_path,
+            reset_num_timesteps,
+            tb_log_name
+        )
     def _setup_learn(
         self,
         total_timesteps: int,
@@ -372,7 +407,36 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         callback.on_training_end()
 
         return self
+    
+    def learn_from_steps(
+        self,
+        total_timesteps: int,
+        get_steps,
+        callback: MaybeCallback = None
+    ) -> "OffPolicyAlgorithm":
 
+        callback.on_training_start(locals(), globals())
+
+        while self.num_timesteps < total_timesteps:
+            steps =  get_steps()
+            rollout = self.collect_rollouts_from_files(
+                self.replay_buffer,
+                steps
+            )
+
+            if rollout.continue_training is False:
+                break
+
+            if self.num_timesteps > 0 and self.num_timesteps > self.learning_starts:
+                # If no `gradient_steps` is specified,
+                # do as many gradients steps as steps performed during the rollout
+                gradient_steps = self.gradient_steps if self.gradient_steps > 0 else rollout.episode_timesteps
+                self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
+
+        callback.on_training_end()
+
+        return self
+    
     def train(self, gradient_steps: int, batch_size: int) -> None:
         """
         Sample the replay buffer and do the updates
@@ -508,6 +572,61 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         if self._vec_normalize_env is not None:
             self._last_original_obs = new_obs_
 
+    def _store_transition_from_file(
+        self,
+        replay_buffer: ReplayBuffer,
+        obs: np.ndarray,
+        buffer_action: np.ndarray,
+        new_obs: np.ndarray,
+        reward: np.ndarray,
+        done: np.ndarray,
+        infos: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Store transition in the replay buffer.
+        We store the normalized action and the unnormalized observation.
+        It also handles terminal observations (because VecEnv resets automatically).
+
+        :param replay_buffer: Replay buffer object where to store the transition.
+        :param obs: current observation
+        :param buffer_action: normalized action
+        :param new_obs: next observation in the current episode
+            or first observation of the episode (when done is True)
+        :param reward: reward for the current transition
+        :param done: Termination signal
+        :param infos: List of additional information about the transition.
+            It may contain the terminal observations and information about timeout.
+        """
+        # Store only the unnormalized version
+        if self._vec_normalize_env is not None:
+            new_obs_ = self._vec_normalize_env.get_original_obs()
+            reward_ = self._vec_normalize_env.get_original_reward()
+        else:
+            # Avoid changing the original ones
+            self._last_original_obs, new_obs_, reward_ = obs, new_obs, reward
+
+        # As the VecEnv resets automatically, new_obs is already the
+        # first observation of the next episode
+        if done:
+            if self._vec_normalize_env is not None:
+                next_obs = self._vec_normalize_env.unnormalize_obs(new_obs_)
+        else:
+            next_obs = new_obs_
+
+        replay_buffer.add(
+            self._last_original_obs,
+            next_obs,
+            buffer_action,
+            reward_,
+            done,
+            infos,
+        )
+
+        self._last_obs = new_obs
+        # Save the unnormalized observation
+        if self._vec_normalize_env is not None:
+            self._last_original_obs = new_obs_
+    
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -613,3 +732,23 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         callback.on_rollout_end()
 
         return RolloutReturn(mean_reward, num_collected_steps, num_collected_episodes, continue_training)
+    def collect_rollouts_from_files(
+        self,
+        replay_buffer: ReplayBuffer,
+        steps: list,
+    ) -> None:
+        """
+        Collect experiences and store them into a ``ReplayBuffer``.
+
+        :param replay_buffer:
+        :param steps: The list of steps from which the transitions are taken from
+        :return:
+        """
+        for step in steps:
+            filename = step.file_path
+            with open(filename, 'rb') as f:
+                (obs, action, reward, done, infos, new_obs) = pickle.load(f)
+            self._store_transition_from_file(replay_buffer, obs, action, new_obs, reward, done, infos)
+        self.num_timesteps += len(steps)
+        
+        
