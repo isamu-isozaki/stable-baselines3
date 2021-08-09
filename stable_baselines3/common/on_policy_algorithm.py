@@ -5,6 +5,7 @@ import gym
 import numpy as np
 import torch as th
 import pickle
+import os
 
 from stable_baselines3.common import logger
 from stable_baselines3.common.base_class import BaseAlgorithm
@@ -216,9 +217,10 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         :return:
         """
         rollout_buffer.reset()
-
         for step in steps:
             filename = step.file_path
+            if int(os.getenv('IS_DOCKER')) == 0:
+                filename = filename.replace('/data', '../ai-data')
             with open(filename, 'rb') as f:
                 (obs, action, reward, done, infos, new_obs) = pickle.load(f)
             with th.no_grad():
@@ -226,6 +228,7 @@ class OnPolicyAlgorithm(BaseAlgorithm):
                 obs_tensor = obs_as_tensor(obs, self.device)
                 _, values, log_probs = self.policy.forward(obs_tensor)
             rollout_buffer.add(obs, action, reward, done, values, log_probs)
+        
         with th.no_grad():
             # Compute value for the last timestep
             obs_tensor = obs_as_tensor(new_obs, self.device)

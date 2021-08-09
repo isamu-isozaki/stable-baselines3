@@ -4,6 +4,7 @@ import time
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
+import os
 import gym
 import numpy as np
 import torch as th
@@ -746,6 +747,8 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         """
         for step in steps:
             filename = step.file_path
+            if int(os.getenv('IS_DOCKER')) == 0:
+                filename = filename.replace('/data', '../ai-data')
             with open(filename, 'rb') as f:
                 (obs, action, reward, done, infos, new_obs) = pickle.load(f)
             self._store_transition_from_file(replay_buffer, obs, action, new_obs, reward, done, infos)
